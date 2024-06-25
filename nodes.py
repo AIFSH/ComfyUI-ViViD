@@ -57,8 +57,8 @@ pose_guider_path = os.path.join(ckpt_dir,"ViViD","pose_guider.pth")
 snapshot_download(repo_id="alibaba-yuanjing-aigclab/ViViD",local_dir=os.path.join(ckpt_dir,"ViViD"))
 
 
-sam_model_path = os.path.join(ckpt_dir,"checkpoints","sam_vit_h_4b8939.pth")
-hf_hub_download(repo_id="ybelkada/segment-anything",filename="sam_vit_h_4b8939.pth",subfolder="checkpoints",local_dir=ckpt_dir)
+sam_model_path = os.path.join(ckpt_dir,"checkpoints","sam_vit_b_01ec64.pth")
+hf_hub_download(repo_id="ybelkada/segment-anything",filename="sam_vit_b_01ec64.pth",subfolder="checkpoints",local_dir=ckpt_dir)
 
 hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_atr.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
 hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_lip.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
@@ -124,10 +124,12 @@ class ViViD_Node:
 
         global pipe,openpose_model,parsing_model,predictor,mask_generator
         if pipe is None:
+            print("load vae")
             vae = AutoencoderKL.from_pretrained(
                 pretrained_vae_path,use_safetensors=True
             ).to(device, dtype=weight_dtype)
 
+            print("load reference_unet")
             reference_unet = UNet2DConditionModel.from_pretrained_2d(
                 pretrained_base_model_path,
                 subfolder="unet",
@@ -137,7 +139,9 @@ class ViViD_Node:
             ).to(dtype=weight_dtype, device=device)
 
             infer_config = OmegaConf.load(os.path.join(now_dir,"ViViD","configs","inference","inference.yaml"))
+            print(infer_config)
 
+            print("load denoising_unet")
             denoising_unet = UNet3DConditionModel.from_pretrained_2d(
                 pretrained_base_model_path,
                 motion_module_path,
@@ -197,7 +201,8 @@ class ViViD_Node:
             predictor = DefaultPredictor(cfg)
 
             ## segment_anying
-            sam = sam_model_registry["vit_h"](checkpoint=sam_model_path)
+            sam = sam_model_registry["vit_b"](checkpoint=sam_model_path)
+            sam.to(device)
             mask_generator = SamAutomaticMaskGenerator(sam)
             # masks = mask_generator.generate(<your_image>)
             
@@ -282,7 +287,7 @@ class ViViD_Node:
         ## cloth
         cloth_name =  Path(cloth_image_path).stem
         cloth_image_pil = Image.open(cloth_image_path).convert("RGB")
-        cloth_image_pil = cloth_image_pil.resize((W,H))
+        # cloth_image_pil = cloth_image_pil.resize((W,H))
         
         '''
         cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}.jpg")
@@ -290,15 +295,18 @@ class ViViD_Node:
         '''
         cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}_mask.jpg") 
         print("SAM generating cloth mask,may take a while...")
-        cloth_image_cv2 = cv2.cvtColor(np.asarray(cloth_image_pil),cv2.COLOR_RGB2BGR)
-        mask = mask_generator.generate(cv2.cvtColor(cloth_image_cv2, cv2.COLOR_BGR2RGB))[0]
-        mask = 255 - mask["segmentation"]*255
-        # print(mask)
-        cv2.imwrite(cloth_mask_path, mask)
-        # mask = np.where(mask==0,1,0).astype(np.uint8)
-        # print(mask)
-        # cloth_mask_pil = Image.fromarray(mask)
-        cloth_mask_pil = Image.open(cloth_mask_path).convert("RGB")
+        cloth_image_cv2 = cv2.imread(cloth_image_path)
+        detected = mask_generator.generate(cv2.cvtColor(cloth_image_cv2, cv2.COLOR_BGR2RGB))[0]
+        logical_arr = detected["segmentation"]
+        inpaint_mask = 1 - logical_arr
+        img = np.where(inpaint_mask, 255, 0)
+        dst = self.hole_fill(img.astype(np.uint8))
+        dst = self.refine_mask(dst)
+        inpaint_mask = dst / 255 * 1
+        cloth_mask_pil = Image.fromarray(inpaint_mask.astype(np.uint8) * 255)
+        cloth_mask_pil.save(cloth_mask_path)
+        # cloth_mask_pil = Image.open(cloth_mask_path).convert("RGB")
+        # print(np.asarray(cloth_mask_pil))
         
         
         pipeline_output = pipe(
@@ -328,6 +336,28 @@ class ViViD_Node:
 
         return (outfile,)
 
+    def refine_mask(self,mask):
+        contours, hierarchy = cv2.findContours(mask.astype(np.uint8),
+                                            cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
+        area = []
+        for j in range(len(contours)):
+            a_d = cv2.contourArea(contours[j], True)
+            area.append(abs(a_d))
+        refine_mask = np.zeros_like(mask).astype(np.uint8)
+        if len(area) != 0:
+            i = area.index(max(area))
+            cv2.drawContours(refine_mask, contours, i, color=255, thickness=-1)
+
+        return refine_mask
+    def hole_fill(self,img):
+        img = np.pad(img[1:-1, 1:-1], pad_width = 1, mode = 'constant', constant_values=0)
+        img_copy = img.copy()
+        mask = np.zeros((img.shape[0] + 2, img.shape[1] + 2), dtype=np.uint8)
+
+        cv2.floodFill(img, mask, (0, 0), 255)
+        img_inverse = cv2.bitwise_not(img)
+        dst = cv2.bitwise_or(img_copy, img_inverse)
+        return dst
 
 class LoadImagePath:
     @classmethod
