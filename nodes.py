@@ -12,7 +12,7 @@ from datetime import datetime
 from omegaconf import OmegaConf
 from torchvision import transforms
 from diffusers import AutoencoderKL, DDIMScheduler
-from huggingface_hub import snapshot_download,hf_hub_download,hf_hub_url
+from huggingface_hub import snapshot_download,hf_hub_download
 from transformers import CLIPVisionModelWithProjection
 
 from ViViD.src.models.pose_guider import PoseGuider
@@ -63,7 +63,7 @@ hf_hub_download(repo_id="ybelkada/segment-anything",filename="sam_vit_h_4b8939.p
 hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_atr.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
 hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_lip.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
 hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="body_pose_model.pth",subfolder="checkpoints/openpose/ckpts",local_dir=ckpt_dir)
-vae = None
+pipe = None
 
 class ViViD_Node:
 
@@ -122,8 +122,8 @@ class ViViD_Node:
         generator = torch.manual_seed(seed)
         time_str = datetime.now().strftime("%H%M")
 
-        global vae
-        if vae is None:
+        global pipe,openpose_model,parsing_model,predictor,mask_generator
+        if pipe is None:
             vae = AutoencoderKL.from_pretrained(
                 pretrained_vae_path,use_safetensors=True
             ).to(device, dtype=weight_dtype)
@@ -168,7 +168,7 @@ class ViViD_Node:
             pose_guider.load_state_dict(
                 torch.load(pose_guider_path, map_location="cpu"),
             )
-
+            
             pipe = Pose2VideoPipeline(
                 vae=vae,
                 image_encoder=image_enc,
@@ -178,7 +178,7 @@ class ViViD_Node:
                 scheduler=scheduler,
             )
             pipe = pipe.to(device, dtype=weight_dtype)
-
+            
             openpose_model = OpenPose(0)
             parsing_model = Parsing(0)
 
@@ -200,6 +200,8 @@ class ViViD_Node:
             sam = sam_model_registry["vit_h"](checkpoint=sam_model_path)
             mask_generator = SamAutomaticMaskGenerator(sam)
             # masks = mask_generator.generate(<your_image>)
+            
+        
 
         ## model video
         transform = transforms.Compose(
@@ -226,7 +228,7 @@ class ViViD_Node:
         pose_list=[]
         for i, vid_image_pil in enumerate(video_images[:clip_length]):
             video_tensor_list.append(transform(vid_image_pil))
-
+            
             ## ootd
             vid_image_pil = vid_image_pil.resize((W,H))
             keypoints = openpose_model(vid_image_pil)
@@ -238,10 +240,9 @@ class ViViD_Node:
             masked_vton_img = Image.composite(mask_gray, vid_image_pil, mask)
             masked_vton_img.save(os.path.join(agnostic_path,"%04d.jpg"%(i+1)))
             agnostic_list.append(masked_vton_img)
-            agn_mask_list.append(mask)
             mask.save(os.path.join(agn_mask_path,"%04d.jpg"%(i+1)))
+            agn_mask_list.append(mask)
 
-            
             vid_image_cv2 = cv2.cvtColor(np.asarray(vid_image_pil),cv2.COLOR_RGB2BGR)
             # print(frame.shape)
             with torch.no_grad():
@@ -260,27 +261,45 @@ class ViViD_Node:
         
         video_tensor = torch.stack(video_tensor_list, dim=0)  # (f, c, h, w)
         video_tensor = video_tensor.transpose(0, 1)
+        '''
+        agnostic_list=[]
+        agnostic_images=read_frames(os.path.join(out_dir,"ViViD","agnostic","lower1.mp4"))
+        for agnostic_image_pil in agnostic_images[:clip_length]:
+            agnostic_list.append(agnostic_image_pil)
 
+        agn_mask_list=[]
+        agn_mask_images=read_frames(os.path.join(out_dir,"ViViD","agnostic_mask","lower1.mp4"))
+        for agn_mask_image_pil in agn_mask_images[:clip_length]:
+            agn_mask_list.append(agn_mask_image_pil)
+
+        pose_list=[]
+        pose_images=read_frames(os.path.join(out_dir,"ViViD","densepose","lower1.mp4"))
+        for pose_image_pil in pose_images[:clip_length]:
+            pose_list.append(pose_image_pil)
+        '''
         video_tensor = video_tensor.unsqueeze(0)
 
         ## cloth
         cloth_name =  Path(cloth_image_path).stem
         cloth_image_pil = Image.open(cloth_image_path).convert("RGB")
-        # cloth_image_pil = cloth_image_pil.resize((W,H))
+        cloth_image_pil = cloth_image_pil.resize((W,H))
+        
         '''
         cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}.jpg")
-        cloth_mask_pil = Image.open(cloth_image_path).convert("RGB")
+        cloth_mask_pil = Image.open(cloth_mask_path).convert("RGB")
         '''
         cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}_mask.jpg") 
         print("SAM generating cloth mask,may take a while...")
         cloth_image_cv2 = cv2.cvtColor(np.asarray(cloth_image_pil),cv2.COLOR_RGB2BGR)
         mask = mask_generator.generate(cv2.cvtColor(cloth_image_cv2, cv2.COLOR_BGR2RGB))[0]
         mask = 255 - mask["segmentation"]*255
-        print(mask)
+        # print(mask)
         cv2.imwrite(cloth_mask_path, mask)
-        mask = np.where(mask==0,1,0).astype(np.uint8)
-        print(mask)
-        cloth_mask_pil = Image.fromarray(mask)
+        # mask = np.where(mask==0,1,0).astype(np.uint8)
+        # print(mask)
+        # cloth_mask_pil = Image.fromarray(mask)
+        cloth_mask_pil = Image.open(cloth_mask_path).convert("RGB")
+        
         
         pipeline_output = pipe(
             agnostic_list,
