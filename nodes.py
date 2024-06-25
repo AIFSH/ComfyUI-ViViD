@@ -12,7 +12,7 @@ from datetime import datetime
 from omegaconf import OmegaConf
 from torchvision import transforms
 from diffusers import AutoencoderKL, DDIMScheduler
-from huggingface_hub import snapshot_download,hf_hub_download
+from huggingface_hub import snapshot_download,hf_hub_download,hf_hub_url
 from transformers import CLIPVisionModelWithProjection
 
 from ViViD.src.models.pose_guider import PoseGuider
@@ -37,7 +37,7 @@ now_dir = os.path.dirname(os.path.abspath(__file__))
 out_dir = folder_paths.get_output_directory()
 input_dir = folder_paths.get_input_directory()
 
-ckpt_dir = os.path.join(now_dir,"ckpts")
+ckpt_dir = os.path.join(now_dir,"checkpoints")
 pretrained_vae_path = os.path.join(ckpt_dir,"sd-vae-ft-mse")
 snapshot_download(repo_id="stabilityai/sd-vae-ft-mse",local_dir=pretrained_vae_path,allow_patterns=['*.json',"*.safetensors"])
 
@@ -57,10 +57,12 @@ pose_guider_path = os.path.join(ckpt_dir,"ViViD","pose_guider.pth")
 snapshot_download(repo_id="alibaba-yuanjing-aigclab/ViViD",local_dir=os.path.join(ckpt_dir,"ViViD"))
 
 
-sam_model_path = os.path.join(ckpt_dir,"sam_vit_b_01ec64.pth")
-hf_hub_download(repo_id="ybelkada/segment-anything",filename="sam_vit_b_01ec64.pth",subfolder="checkpoints",local_dir=ckpt_dir)
+sam_model_path = os.path.join(ckpt_dir,"checkpoints","sam_vit_h_4b8939.pth")
+hf_hub_download(repo_id="ybelkada/segment-anything",filename="sam_vit_h_4b8939.pth",subfolder="checkpoints",local_dir=ckpt_dir)
 
-
+hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_atr.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
+hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="parsing_lip.onnx",subfolder="checkpoints/humanparsing",local_dir=ckpt_dir)
+hf_hub_download(repo_id="levihsu/OOTDiffusion",filename="body_pose_model.pth",subfolder="checkpoints/openpose/ckpts",local_dir=ckpt_dir)
 vae = None
 
 class ViViD_Node:
@@ -113,6 +115,13 @@ class ViViD_Node:
         else:
             weight_dtype = torch.float32
         device = "cuda" if cuda_malloc.cuda_malloc_supported() else "cpu"
+
+        width, height = W, H
+        clip_length = L 
+        guidance_scale = cfg
+        generator = torch.manual_seed(seed)
+        time_str = datetime.now().strftime("%H%M")
+
         global vae
         if vae is None:
             vae = AutoencoderKL.from_pretrained(
@@ -177,30 +186,22 @@ class ViViD_Node:
             # Initialize Detectron2 configuration for DensePose
             cfg = get_cfg()
             add_densepose_config(cfg)
-            cfg.merge_from_file("detectron2/projects/DensePose/configs/densepose_rcnn_R_50_FPN_s1x.yaml")
+            # cfg.merge_from_file("detectron2/projects/DensePose/configs/densepose_rcnn_R_50_FPN_s1x.yaml")
+            cfg._BASE_ = os.path.join(now_dir,"Base-DensePose-RCNN-FPN.yaml")
+            cfg.merge_from_file(cfg._BASE_)
+            cfg.SOLVER.MAX_ITER = 130000
+            cfg.SOLVER.STEPS= (100000, 120000)
+            cfg.MODEL.RESNETS.DEPTH=50
             cfg.MODEL.WEIGHTS = "https://dl.fbaipublicfiles.com/densepose/densepose_rcnn_R_50_FPN_s1x/165712039/model_final_162be9.pkl"
             cfg.MODEL.DEVICE = device
             predictor = DefaultPredictor(cfg)
 
             ## segment_anying
-            sam = sam_model_registry["vit_b"](checkpoint=sam_model_path)
+            sam = sam_model_registry["vit_h"](checkpoint=sam_model_path)
             mask_generator = SamAutomaticMaskGenerator(sam)
             # masks = mask_generator.generate(<your_image>)
 
-
-        generator = torch.manual_seed(seed)
-
-        width, height = W, H
-        clip_length = L 
-        guidance_scale = cfg
-
-        date_str = datetime.now().strftime("%Y%m%d")
-        time_str = datetime.now().strftime("%H%M")
-        save_dir_name = f"{time_str}--seed_{seed}-{W}x{H}"
-
-        save_dir = os.path.join(out_dir,"ViViD",date_str,save_dir_name)
-        os.makedirs(save_dir,exist_ok=True)
-
+        ## model video
         transform = transforms.Compose(
             [transforms.Resize((height, width)), transforms.ToTensor()]
         )
@@ -227,6 +228,7 @@ class ViViD_Node:
             video_tensor_list.append(transform(vid_image_pil))
 
             ## ootd
+            vid_image_pil = vid_image_pil.resize((W,H))
             keypoints = openpose_model(vid_image_pil)
             model_parse, _ = parsing_model(vid_image_pil)
             mask, mask_gray = get_mask_location("hd",category, model_parse, keypoints)
@@ -239,7 +241,9 @@ class ViViD_Node:
             agn_mask_list.append(mask)
             mask.save(os.path.join(agn_mask_path,"%04d.jpg"%(i+1)))
 
-            vid_image_cv2 = cv2.cvtColor(np.array(vid_image_pil),cv2.COLOR_RGB2BGR)
+            
+            vid_image_cv2 = cv2.cvtColor(np.asarray(vid_image_pil),cv2.COLOR_RGB2BGR)
+            # print(frame.shape)
             with torch.no_grad():
                 outputs = predictor(vid_image_cv2)['instances']
         
@@ -248,27 +252,36 @@ class ViViD_Node:
             # Visualizer outputs black for background, but we want the 0 value of
             # the colormap, so we initialize the array with that value
             arr = cv2.applyColorMap(np.zeros((height, width), dtype=np.uint8), cmap)
-            out_frame = Visualizer(alpha=1, cmap=cmap).visualize(arr, results)        
+            out_frame = Visualizer(alpha=1, cmap=cmap).visualize(arr, results)
             out_frame_pil = Image.fromarray(cv2.cvtColor(out_frame,cv2.COLOR_BGR2RGB))
-            pose_list.append(out_frame_pil)
             out_frame_pil.save(os.path.join(densepose_path,"%04d.jpg"%(i+1)))
-
-
+            pose_list.append(out_frame_pil)
+            
+        
         video_tensor = torch.stack(video_tensor_list, dim=0)  # (f, c, h, w)
         video_tensor = video_tensor.transpose(0, 1)
 
         video_tensor = video_tensor.unsqueeze(0)
 
+        ## cloth
         cloth_name =  Path(cloth_image_path).stem
         cloth_image_pil = Image.open(cloth_image_path).convert("RGB")
-
+        # cloth_image_pil = cloth_image_pil.resize((W,H))
+        '''
+        cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}.jpg")
+        cloth_mask_pil = Image.open(cloth_image_path).convert("RGB")
+        '''
         cloth_mask_path = os.path.join(out_dir,"ViViD",f"{cloth_name}_mask.jpg") 
-        cloth_image_cv2 = cv2.imread(cloth_image_path)
-
-        mask = mask_generator(cv2.cvtColor(cloth_image_cv2, cv2.COLOR_BGR2RGB))[0]
-        cv2.imwrite(cloth_mask_path, mask["segmentation"] * 255)
-        cloth_mask_pil = Image.open(cloth_mask_path).convert("RGB")
-
+        print("SAM generating cloth mask,may take a while...")
+        cloth_image_cv2 = cv2.cvtColor(np.asarray(cloth_image_pil),cv2.COLOR_RGB2BGR)
+        mask = mask_generator.generate(cv2.cvtColor(cloth_image_cv2, cv2.COLOR_BGR2RGB))[0]
+        mask = 255 - mask["segmentation"]*255
+        print(mask)
+        cv2.imwrite(cloth_mask_path, mask)
+        mask = np.where(mask==0,1,0).astype(np.uint8)
+        print(mask)
+        cloth_mask_pil = Image.fromarray(mask)
+        
         pipeline_output = pipe(
             agnostic_list,
             agn_mask_list,
@@ -285,6 +298,7 @@ class ViViD_Node:
         video = pipeline_output.videos
 
         video = torch.cat([video], dim=0)
+        # video = torch.cat([video_tensor,video], dim=0)
         outfile = os.path.join(out_dir, f"{model_name}_{cloth_name}_{H}x{W}_{int(guidance_scale)}_{time_str}.mp4")
         save_videos_grid(
             video,
@@ -324,7 +338,7 @@ class LoadVideo:
     CATEGORY = "AIFSH_ViViD"
     DESCRIPTION = "hello world!"
 
-    RETURN_TYPES = ("VIDEO")
+    RETURN_TYPES = ("VIDEO",)
 
     OUTPUT_NODE = False
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).absolute().parents[3].absolute()
 
-annotator_ckpts_path = os.path.join(PROJECT_ROOT, 'checkpoints/openpose/ckpts')
+annotator_ckpts_path = os.path.join(PROJECT_ROOT, 'checkpoints/checkpoints/openpose/ckpts')
 # print(annotator_ckpts_path)
 
 def HWC3(x):

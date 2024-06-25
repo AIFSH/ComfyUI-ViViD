@@ -17,9 +17,9 @@ class Parsing:
         session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         session_options.add_session_config_entry('gpu_id', str(gpu_id))
-        self.session = ort.InferenceSession(os.path.join(Path(__file__).absolute().parents[2].absolute(), 'checkpoints/humanparsing/parsing_atr.onnx'),
+        self.session = ort.InferenceSession(os.path.join(Path(__file__).absolute().parents[2].absolute(), 'checkpoints/checkpoints/humanparsing/parsing_atr.onnx'),
                                             sess_options=session_options, providers=['CPUExecutionProvider'])
-        self.lip_session = ort.InferenceSession(os.path.join(Path(__file__).absolute().parents[2].absolute(), 'checkpoints/humanparsing/parsing_lip.onnx'),
+        self.lip_session = ort.InferenceSession(os.path.join(Path(__file__).absolute().parents[2].absolute(), 'checkpoints/checkpoints/humanparsing/parsing_lip.onnx'),
                                                 sess_options=session_options, providers=['CPUExecutionProvider'])
         
 

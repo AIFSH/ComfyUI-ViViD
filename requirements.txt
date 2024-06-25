@@ -20,5 +20,4 @@ mlflow
 git+https://github.com/facebookresearch/detectron2.git
 git+https://github.com/facebookresearch/detectron2@main#subdirectory=projects/DensePose
 git+https://github.com/facebookresearch/segment-anything.git
-
 # 安装densepose 提示文件扩展名过长 https://blog.csdn.net/weixin_43148691/article/details/117354062
